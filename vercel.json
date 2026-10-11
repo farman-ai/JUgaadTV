@@ -4,6 +4,9 @@
   "functions": {
     "api/[...path].js": {
       "maxDuration": 60
+    },
+    "api/stream/[channelId].js": {
+      "maxDuration": 60
     }
   },
   "rewrites": [
