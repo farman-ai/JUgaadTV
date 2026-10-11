@@ -10,9 +10,9 @@ import express from "express";
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
+const onVercel = Boolean(process.env.VERCEL);
 const PLAYLIST_URL = "https://iptv-org.github.io/iptv/index.m3u";
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
-const sessions = new Map();
 const loginAttempts = new Map();
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const production = process.env.NODE_ENV === "production";
@@ -195,8 +195,36 @@ function rememberStreamTarget(targets, url) {
   }
 }
 
+function signValue(value, secret) {
+  const encoded = Buffer.from(value).toString("base64url");
+  const signature = crypto.createHmac("sha256", secret).update(encoded).digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+function verifySignedValue(token, secret) {
+  if (typeof token !== "string") return null;
+  const separator = token.lastIndexOf(".");
+  if (separator <= 0) return null;
+  const encoded = token.slice(0, separator);
+  const suppliedSignature = Buffer.from(token.slice(separator + 1), "base64url");
+  const expectedSignature = Buffer.from(
+    crypto.createHmac("sha256", secret).update(encoded).digest("base64url")
+  );
+  if (suppliedSignature.length !== expectedSignature.length ||
+      !crypto.timingSafeEqual(suppliedSignature, expectedSignature)) return null;
+  return Buffer.from(encoded, "base64url").toString();
+}
+
 function proxiedStreamUrl(channelId, target) {
-  return `/api/stream/${encodeURIComponent(channelId)}?url=${encodeURIComponent(target)}`;
+  const query = new URLSearchParams({ url: target });
+  if (onVercel) {
+    const secret = process.env.RELAY_SECRET || process.env.ADMIN_PASSWORD;
+    if (!secret) throw new Error("Set RELAY_SECRET in Vercel to enable the stream relay.");
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    query.set("expires", String(expiresAt));
+    query.set("signature", signValue(`${channelId}\n${expiresAt}\n${target}`, secret));
+  }
+  return `/api/stream/${encodeURIComponent(channelId)}?${query}`;
 }
 
 async function fetchPublicStream(initialUrl, headers, channelTargets, signal) {
@@ -229,11 +257,25 @@ app.get("/api/stream/:channelId", async (req, res) => {
     const channel = channels.find((item) => item.id === channelId);
     if (!channel) return res.status(404).json({ error: "Channel not found." });
 
+    const relaySecret = process.env.RELAY_SECRET || process.env.ADMIN_PASSWORD;
+    if (onVercel && !relaySecret) {
+      return res.status(503).json({ error: "Set RELAY_SECRET in Vercel to enable the stream relay." });
+    }
     const targets = getStreamTargets(channelId);
     const target = req.query.url || channel.url;
     if (typeof target !== "string") return res.status(400).json({ error: "Invalid stream URL." });
-    if (target === channel.url) rememberStreamTarget(targets, target);
-    if (!targets.has(target)) return res.status(403).json({ error: "Stream URL is not part of this channel." });
+    if (onVercel && target !== channel.url) {
+      const expiresAt = Number(req.query.expires);
+      const signedValue = verifySignedValue(req.query.signature, relaySecret);
+      if (!Number.isSafeInteger(expiresAt) || expiresAt < Date.now() ||
+          signedValue !== `${channelId}\n${expiresAt}\n${target}`) {
+        return res.status(403).json({ error: "Stream URL signature is invalid or expired." });
+      }
+    } else if (target === channel.url) {
+      rememberStreamTarget(targets, target);
+    } else if (!targets.has(target)) {
+      return res.status(403).json({ error: "Stream URL is not part of this channel." });
+    }
     await assertPublicUrl(target);
 
     const { response, finalUrl } = await fetchPublicStream(target, {
@@ -296,16 +338,22 @@ function readCookie(req, name) {
 
 function requireAdmin(req, res, next) {
   const token = readCookie(req, "tvvibe_session");
-  const expiresAt = sessions.get(token);
-  if (!token || !expiresAt || expiresAt < Date.now()) {
-    sessions.delete(token);
+  const configuredPassword = process.env.ADMIN_PASSWORD;
+  const session = configuredPassword ? verifySignedValue(token, configuredPassword) : null;
+  const expiresAt = Number(session?.split(".")[0]);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt < Date.now()) {
     return res.status(401).json({ error: "Please sign in as admin." });
   }
   next();
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, app: "JUGAADTV", adminConfigured: Boolean(process.env.ADMIN_PASSWORD) });
+  res.json({
+    ok: true,
+    app: "JUGAADTV",
+    adminConfigured: Boolean(process.env.ADMIN_PASSWORD),
+    relayConfigured: !onVercel || Boolean(process.env.RELAY_SECRET || process.env.ADMIN_PASSWORD)
+  });
 });
 
 app.get("/api/channels", async (_req, res) => {
@@ -346,8 +394,8 @@ app.post("/api/admin/login", (req, res) => {
   }
 
   loginAttempts.delete(address);
-  const token = crypto.randomBytes(32).toString("base64url");
-  sessions.set(token, Date.now() + SESSION_TTL_MS);
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  const token = signValue(`${expiresAt}.${crypto.randomBytes(16).toString("base64url")}`, configuredPassword);
   res.cookie("tvvibe_session", token, {
     httpOnly: true,
     sameSite: "strict",
@@ -360,16 +408,16 @@ app.post("/api/admin/login", (req, res) => {
 
 app.get("/api/admin/session", (req, res) => {
   const token = readCookie(req, "tvvibe_session");
-  const expiresAt = sessions.get(token);
-  if (!token || !expiresAt || expiresAt < Date.now()) {
-    sessions.delete(token);
+  const configuredPassword = process.env.ADMIN_PASSWORD;
+  const session = configuredPassword ? verifySignedValue(token, configuredPassword) : null;
+  const expiresAt = Number(session?.split(".")[0]);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt < Date.now()) {
     return res.json({ authenticated: false });
   }
   res.json({ authenticated: true, expiresAt });
 });
 
 app.post("/api/admin/logout", (req, res) => {
-  sessions.delete(readCookie(req, "tvvibe_session"));
   res.clearCookie("tvvibe_session", { httpOnly: true, sameSite: "strict", secure: production, path: "/" });
   res.status(204).end();
 });
@@ -384,15 +432,21 @@ app.post("/api/admin/refresh", requireAdmin, async (_req, res) => {
   }
 });
 
-if (production) {
+if (production && !onVercel) {
   const distPath = path.resolve(dirname, "../dist");
   app.use(express.static(distPath));
   app.get("*splat", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
 }
 
-app.listen(PORT, HOST, () => {
-  console.log(`JUGAADTV API listening on http://localhost:${PORT}`);
-  if (!process.env.ADMIN_PASSWORD) {
-    console.warn("Admin login disabled; start with ADMIN_PASSWORD='your-password' to enable it.");
-  }
-});
+if (onVercel) {
+  console.warn("Admin login disabled; set ADMIN_PASSWORD in Vercel to enable it.");
+} else {
+  app.listen(PORT, HOST, () => {
+    console.log(`JUGAADTV API listening on http://localhost:${PORT}`);
+    if (!process.env.ADMIN_PASSWORD) {
+      console.warn("Admin login disabled; start with ADMIN_PASSWORD='your-password' to enable it.");
+    }
+  });
+}
+
+export default app;
