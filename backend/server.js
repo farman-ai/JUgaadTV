@@ -262,25 +262,16 @@ app.get("/api/stream/:channelId", async (req, res) => {
       return res.status(503).json({ error: "Set RELAY_SECRET in Vercel to enable the stream relay." });
     }
     const targets = getStreamTargets(channelId);
-    const target = req.query.url || channel.url;
+    const streamQuery = new URL(req.originalUrl, "http://localhost").searchParams;
+    const target = streamQuery.get("url") || channel.url;
     if (typeof target !== "string") return res.status(400).json({ error: "Invalid stream URL." });
     if (onVercel && target !== channel.url) {
-      const expiresAt = Number(req.query.expires);
-      const signature = req.query.signature;
+      const expiresAt = Number(streamQuery.get("expires"));
+      const signature = streamQuery.get("signature");
       const signedValue = verifySignedValue(signature, relaySecret);
       const expectedValue = `${channelId}\n${expiresAt}\n${target}`;
       if (!Number.isSafeInteger(expiresAt) || expiresAt < Date.now() || signedValue !== expectedValue) {
-        const encoded = typeof signature === "string" ? signature.slice(0, signature.lastIndexOf(".")) : "";
-        const decoded = encoded ? Buffer.from(encoded, "base64url").toString() : "";
-        return res.status(403).json({
-          error: "Stream URL signature is invalid or expired.",
-          diagnostics: {
-            signaturePresent: Boolean(signature),
-            signatureVerified: signedValue !== null,
-            signedPayloadMatches: decoded === expectedValue,
-            expiryValid: Number.isSafeInteger(expiresAt) && expiresAt >= Date.now()
-          }
-        });
+        return res.status(403).json({ error: "Stream URL signature is invalid or expired." });
       }
     } else if (target === channel.url) {
       rememberStreamTarget(targets, target);
