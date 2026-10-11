@@ -27,7 +27,7 @@ The production app is available at <http://localhost:3000>.
 
 ## Deploy on Vercel
 
-Import this GitHub repository into Vercel. The included `vercel.json` builds the Vite frontend as static files and routes `/api/*` to an Express serverless function. Set a private `RELAY_SECRET` environment variable in the Vercel project before deploying to enable signed HLS relay URLs across serverless instances. Use a randomly generated secret of at least 32 characters; do not commit it. Optionally set `ADMIN_PASSWORD` to enable admin login. Admin sessions are signed and can be verified across function instances.
+Import this GitHub repository into Vercel. The included `vercel.json` builds the Vite frontend as static files and routes `/api/*` to Express serverless functions. Set a private `RELAY_SECRET` environment variable in the Vercel project before deploying to enable signed HLS relay URLs across serverless instances. Use a randomly generated secret of at least 32 characters; do not commit it. Optionally set `ADMIN_PASSWORD` to enable admin login. Admin sessions are signed and can be verified across function instances.
 
 Vercel Hobby functions have a maximum execution duration, so the relay works best with streams whose HLS segments complete within that limit. Stream availability, provider restrictions, and codecs remain outside the app's control.
 
@@ -39,7 +39,7 @@ The repository includes a `render.yaml` Blueprint for the Node web service, prod
 
 - HLS and browser-native live playback
 - Search, country and category filters
-- Favorites and watch history stored in the browser
+- Isolated guest sessions keep favorites, watch history, and intro preferences private to each browser tab; existing browser preferences migrate to the first guest session
 - Opens on Recently watched and resumes the last available channel; first-time visitors get the intro and Colors (576p) as the starter channel
 - Separate `/admin` dashboard with an optional password-protected playlist refresh
 - Adaptive/manual HLS rendition selection with a lower-quality recovery attempt after a sustained stall

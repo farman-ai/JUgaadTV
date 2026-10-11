@@ -208,7 +208,8 @@ function verifySignedValue(token, secret) {
   const encoded = token.slice(0, separator);
   const suppliedSignature = Buffer.from(token.slice(separator + 1), "base64url");
   const expectedSignature = Buffer.from(
-    crypto.createHmac("sha256", secret).update(encoded).digest("base64url")
+    crypto.createHmac("sha256", secret).update(encoded).digest("base64url"),
+    "base64url"
   );
   if (suppliedSignature.length !== expectedSignature.length ||
       !crypto.timingSafeEqual(suppliedSignature, expectedSignature)) return null;
@@ -216,7 +217,7 @@ function verifySignedValue(token, secret) {
 }
 
 function proxiedStreamUrl(channelId, target) {
-  const query = new URLSearchParams({ url: target });
+  const query = new URLSearchParams({ channelId, url: target });
   if (onVercel) {
     const secret = process.env.RELAY_SECRET || process.env.ADMIN_PASSWORD;
     if (!secret) throw new Error("Set RELAY_SECRET in Vercel to enable the stream relay.");
@@ -224,7 +225,7 @@ function proxiedStreamUrl(channelId, target) {
     query.set("expires", String(expiresAt));
     query.set("signature", signValue(`${channelId}\n${expiresAt}\n${target}`, secret));
   }
-  return `/api/stream/${encodeURIComponent(channelId)}?${query}`;
+  return `/api/stream-handler?${query}`;
 }
 
 async function fetchPublicStream(initialUrl, headers, channelTargets, signal) {
@@ -248,8 +249,10 @@ async function fetchPublicStream(initialUrl, headers, channelTargets, signal) {
   throw new Error("Stream source redirected too many times");
 }
 
-app.get("/api/stream/:channelId", async (req, res) => {
-  const { channelId } = req.params;
+app.get("/api/stream-handler", async (req, res) => {
+  const streamQuery = new URL(req.originalUrl, "http://localhost").searchParams;
+  const channelId = streamQuery.get("channelId");
+  if (!channelId) return res.status(400).json({ error: "Channel ID is required." });
   const controller = new AbortController();
   req.on("aborted", () => controller.abort());
   try {
@@ -262,7 +265,6 @@ app.get("/api/stream/:channelId", async (req, res) => {
       return res.status(503).json({ error: "Set RELAY_SECRET in Vercel to enable the stream relay." });
     }
     const targets = getStreamTargets(channelId);
-    const streamQuery = new URL(req.originalUrl, "http://localhost").searchParams;
     const target = streamQuery.get("url") || channel.url;
     if (typeof target !== "string") return res.status(400).json({ error: "Invalid stream URL." });
     if (onVercel && target !== channel.url) {

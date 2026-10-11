@@ -5,6 +5,8 @@ import "./styles.css";
 const FAVORITES_KEY = "tvvibe:favorites";
 const HISTORY_KEY = "tvvibe:history";
 const INTRO_SOUND_KEY = "jugaadtv:intro-sound";
+const GUEST_SESSION_KEY = "jugaadtv:guest-session-id";
+const GUEST_MIGRATION_KEY = "jugaadtv:guest-storage-migrated";
 const HISTORY_LIMIT = 12;
 const PLAYER_INTRO_DURATION_MS = 5200;
 const PLAYER_INTRO_STORY = [
@@ -21,13 +23,59 @@ const HOT_CHANNEL_PRESETS = [
   { startsWith: "zee cinema (576p)", badge: "576p · MOVIES", tagline: "Movies • Zee Cinema", art: "zee" },
   { startsWith: "b4u movies (576p)", badge: "576p · MOVIES", tagline: "Movies • B4U", art: "gold" }
 ];
+const guestMemoryStorage = new Map();
 
-function readStorage(key, fallback) {
+function getOrCreateGuestSession() {
+  let existingId;
   try {
-    const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : fallback;
+    existingId = sessionStorage.getItem(GUEST_SESSION_KEY);
   } catch {
-    return fallback;
+    return `guest-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  if (existingId) return existingId;
+
+  const sessionToken = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2, 10);
+  const sessionId = `guest-${sessionToken.slice(0, 8)}`;
+  try {
+    sessionStorage.setItem(GUEST_SESSION_KEY, sessionId);
+  } catch {
+    return sessionId;
+  }
+
+  try {
+    if (localStorage.getItem(GUEST_MIGRATION_KEY) !== "done") {
+      for (const key of [FAVORITES_KEY, HISTORY_KEY, INTRO_SOUND_KEY]) {
+        const legacyValue = localStorage.getItem(key);
+        if (legacyValue !== null) sessionStorage.setItem(`${key}:${sessionId}`, legacyValue);
+      }
+      localStorage.setItem(GUEST_MIGRATION_KEY, "done");
+    }
+  } catch {
+    // Guest state remains usable when browser storage is restricted.
+  }
+  return sessionId;
+}
+
+function readGuestStorage(key, sessionId, fallback) {
+  const storageKey = `${key}:${sessionId}`;
+  try {
+    const value = sessionStorage.getItem(storageKey);
+    if (value !== null) return JSON.parse(value);
+  } catch {
+    const value = guestMemoryStorage.get(storageKey);
+    return value === undefined ? fallback : value;
+  }
+  const value = guestMemoryStorage.get(storageKey);
+  return value === undefined ? fallback : value;
+}
+
+function writeGuestStorage(key, sessionId, value) {
+  const storageKey = `${key}:${sessionId}`;
+  guestMemoryStorage.set(storageKey, value);
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify(value));
+  } catch {
+    // Keep the current tab's state in memory when browser storage is unavailable.
   }
 }
 
@@ -279,6 +327,7 @@ function AdminDashboard() {
 }
 
 function App() {
+  const [guestSessionId] = useState(getOrCreateGuestSession);
   const videoRef = useRef(null);
   const audioContextRef = useRef(null);
   const hlsRef = useRef(null);
@@ -299,11 +348,11 @@ function App() {
   const [country, setCountry] = useState("all");
   const [category, setCategory] = useState("all");
   const [tab, setTab] = useState(() => {
-    const recent = readStorage(HISTORY_KEY, []);
+    const recent = readGuestStorage(HISTORY_KEY, guestSessionId, []);
     return Array.isArray(recent) && recent.length > 0 ? "recent" : "all";
   });
-  const [favorites, setFavorites] = useState(() => readStorage(FAVORITES_KEY, []));
-  const [history, setHistory] = useState(() => readStorage(HISTORY_KEY, []));
+  const [favorites, setFavorites] = useState(() => readGuestStorage(FAVORITES_KEY, guestSessionId, []));
+  const [history, setHistory] = useState(() => readGuestStorage(HISTORY_KEY, guestSessionId, []));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [playerStatus, setPlayerStatus] = useState("Choose a channel");
@@ -315,11 +364,11 @@ function App() {
   const [showPlayerIntro, setShowPlayerIntro] = useState(false);
   const [playerIntroElapsed, setPlayerIntroElapsed] = useState(0);
   const [playerIntroRun, setPlayerIntroRun] = useState(0);
-  const [introSoundEnabled, setIntroSoundEnabled] = useState(() => readStorage(INTRO_SOUND_KEY, true));
+  const [introSoundEnabled, setIntroSoundEnabled] = useState(() => readGuestStorage(INTRO_SOUND_KEY, guestSessionId, true));
 
-  useEffect(() => localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites)), [favorites]);
-  useEffect(() => localStorage.setItem(HISTORY_KEY, JSON.stringify(history)), [history]);
-  useEffect(() => localStorage.setItem(INTRO_SOUND_KEY, JSON.stringify(introSoundEnabled)), [introSoundEnabled]);
+  useEffect(() => writeGuestStorage(FAVORITES_KEY, guestSessionId, favorites), [favorites, guestSessionId]);
+  useEffect(() => writeGuestStorage(HISTORY_KEY, guestSessionId, history), [history, guestSessionId]);
+  useEffect(() => writeGuestStorage(INTRO_SOUND_KEY, guestSessionId, introSoundEnabled), [introSoundEnabled, guestSessionId]);
   useEffect(() => {
     if (introSoundEnabled) return;
     introMusicStopRef.current?.();
@@ -510,7 +559,9 @@ function App() {
   const playChannel = useCallback((channel, automaticFailover = false, usingRelay = false) => {
     const video = videoRef.current;
     if (!video || !channel) return;
-    const streamUrl = usingRelay ? `/api/stream/${encodeURIComponent(channel.id)}` : channel.url;
+    const streamUrl = usingRelay
+      ? `/api/stream-handler?channelId=${encodeURIComponent(channel.id)}`
+      : channel.url;
     window.clearTimeout(recoveryTimerRef.current);
     recoveryTimerRef.current = null;
     if (!automaticFailover) {
@@ -761,7 +812,9 @@ function App() {
           <button className="icon-button sound-toggle" onClick={() => setIntroSoundEnabled((enabled) => !enabled)} aria-label={introSoundEnabled ? "Mute JUGAADTV intro sound" : "Enable JUGAADTV intro sound"} aria-pressed={introSoundEnabled} title={introSoundEnabled ? "Intro sound on" : "Intro sound off"}>
             {introSoundEnabled ? "♫" : "×"}
           </button>
-          <div className="profile-button" aria-label="User account"><span className="profile-avatar">U</span><span className="profile-label">User</span></div>
+          <div className="profile-button" aria-label={`Guest session ${guestSessionId}; preferences are private to this tab`} title={`Guest session ${guestSessionId}`}>
+            <span className="profile-avatar">G</span><span className="profile-label">Guest · {guestSessionId.slice(-4)}</span>
+          </div>
         </div>
       </header>
 
