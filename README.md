@@ -39,7 +39,7 @@ The repository includes a `render.yaml` Blueprint for the Node web service, prod
 
 - HLS and browser-native live playback
 - Search, country and category filters
-- Isolated guest sessions keep favorites, watch history, and intro preferences private to each browser tab; existing browser preferences migrate to the first guest session
+- Device-local guest sessions keep favorites, watch history, and intro preferences in the browser's local storage, isolated from other devices; existing preferences migrate to the current device
 - Opens on Recently watched and resumes the last available channel; first-time visitors get the intro and Colors (576p) as the starter channel
 - Separate `/admin` dashboard with an optional password-protected playlist refresh
 - Adaptive/manual HLS rendition selection with a lower-quality recovery attempt after a sustained stall
