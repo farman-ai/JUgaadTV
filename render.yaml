@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: jugaadtv
+    runtime: node
+    buildCommand: npm ci && npm run build
+    startCommand: HOST=0.0.0.0 npm start
+    healthCheckPath: /api/health
